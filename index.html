@@ -47,6 +47,12 @@
       return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
     };
 
+    const addDaysISO = (dateISO, days) => {
+      const d = new Date(dateISO + 'T00:00:00');
+      d.setDate(d.getDate() + Number(days || 7));
+      return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    };
+
     const daysRemaining = (endISO) => {
       const t = new Date(todayISO() + 'T00:00:00').getTime();
       const e = new Date(endISO + 'T00:00:00').getTime();
@@ -99,6 +105,11 @@
       left: ['غادر المجموعة', 'bg-purple-50 text-purple-700 border-purple-200'],
     };
 
+    const CYCLE_LABELS = {
+      weekly: ['أسبوعي', 'bg-violet-100 text-violet-800 border-violet-200'],
+      monthly: ['شهري', 'bg-sky-100 text-sky-800 border-sky-200'],
+    };
+
     const Badge = ({ type, map }) => {
       const [label, cls] = map[type] || Object.values(map)[0];
       return <span className={`inline-block px-2.5 py-1 rounded-full text-xs font-bold border ${cls}`}>{label}</span>;
@@ -147,8 +158,9 @@
     }
 
     function PaymentModal({ open, member, settings, db, onDone, onClose }) {
+      const [cycle, setCycle] = useState('monthly');
+      const [count, setCount] = useState(1);
       const [amount, setAmount] = useState('');
-      const [months, setMonths] = useState(1);
       const [date, setDate] = useState(todayISO());
       const [method, setMethod] = useState('نقدي');
       const [ref, setRef] = useState('');
@@ -159,9 +171,12 @@
 
       useEffect(() => {
         if (open && member) {
-          const m = settings.default_duration_months || 1;
-          setMonths(m);
-          setAmount(String((member.monthly_fee || settings.default_monthly_fee) * m));
+          const c = member.billing_cycle || 'monthly';
+          const cnt = c === 'weekly' ? 1 : (settings.default_duration_months || 1);
+          const unitFee = Number(member.monthly_fee || (c === 'weekly' ? (settings.default_weekly_fee || 15) : settings.default_monthly_fee));
+          setCycle(c);
+          setCount(cnt);
+          setAmount(String(unitFee * cnt));
           setDate(todayISO());
           setMethod('نقدي');
           setRef('');
@@ -172,6 +187,26 @@
       }, [open, member]);
 
       if (!open || !member) return null;
+
+      const switchCycle = (newCycle) => {
+        setCycle(newCycle);
+        const cnt = 1;
+        setCount(cnt);
+        const memberCycle = member.billing_cycle || 'monthly';
+        const unitFee = newCycle === memberCycle
+          ? Number(member.monthly_fee)
+          : Number(newCycle === 'weekly' ? (settings.default_weekly_fee || 15) : settings.default_monthly_fee);
+        setAmount(String(unitFee * cnt));
+      };
+
+      const changeCount = (cnt) => {
+        setCount(cnt);
+        const memberCycle = member.billing_cycle || 'monthly';
+        const unitFee = cycle === memberCycle
+          ? Number(member.monthly_fee)
+          : Number(cycle === 'weekly' ? (settings.default_weekly_fee || 15) : settings.default_monthly_fee);
+        setAmount(String(unitFee * cnt));
+      };
 
       const submit = async (e) => {
         e.preventDefault();
@@ -186,8 +221,10 @@
             p_payment_method: method,
             p_transaction_ref: ref,
             p_notes: notes,
-            p_duration_months: Number(months),
+            p_duration_months: cycle === 'monthly' ? Number(count) : 0,
             p_idempotency_key: key,
+            p_duration_days: cycle === 'weekly' ? Number(count) * 7 : 0,
+            p_billing_cycle: cycle,
           });
           if (error) throw error;
           onDone();
@@ -207,17 +244,33 @@
               <button onClick={onClose} className="px-3 py-1 rounded-lg bg-slate-100 font-bold">✕</button>
             </div>
             <form onSubmit={submit} className="mt-4 space-y-3.5">
-              <div className="bg-teal-50 border border-teal-100 rounded-xl p-3 text-sm">
-                <div className="font-bold text-teal-900">{member.full_name}</div>
-                <div className="text-teal-700">الاشتراك الشهري: {formatMoney(member.monthly_fee, settings.currency)}</div>
+              <div className="bg-teal-50 border border-teal-100 rounded-xl p-3 text-sm flex justify-between items-center">
+                <div>
+                  <div className="font-bold text-teal-900">{member.full_name}</div>
+                  <div className="text-teal-700 text-xs">الاشتراك الحالي: {formatMoney(member.monthly_fee, settings.currency)} ({member.billing_cycle === 'weekly' ? 'أسبوعي' : 'شهري'})</div>
+                </div>
+                <Badge type={member.billing_cycle || 'monthly'} map={CYCLE_LABELS} />
               </div>
               {err && <div className="p-3 rounded-xl bg-rose-50 text-rose-700 text-sm font-bold">{err}</div>}
+              <div>
+                <label className="block text-xs font-bold mb-1">نظام التجديد</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={() => switchCycle('weekly')} className={`py-2.5 rounded-xl text-sm font-bold border ${cycle === 'weekly' ? 'bg-violet-700 text-white border-violet-700' : 'bg-white text-slate-700 border-slate-300'}`}>أسبوعي (7 أيام)</button>
+                  <button type="button" onClick={() => switchCycle('monthly')} className={`py-2.5 rounded-xl text-sm font-bold border ${cycle === 'monthly' ? 'bg-teal-700 text-white border-teal-700' : 'bg-white text-slate-700 border-slate-300'}`}>شهري</button>
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold mb-1">المدة</label>
-                  <select value={months} onChange={(e) => { const m = Number(e.target.value); setMonths(m); setAmount(String(member.monthly_fee * m)); }} className="w-full border border-slate-300 rounded-xl p-3 text-sm bg-white">
-                    {[1,2,3,6,12].map((m) => <option key={m} value={m}>{m} {m===1?'شهر':'أشهر'}</option>)}
-                  </select>
+                  {cycle === 'weekly' ? (
+                    <select value={count} onChange={(e) => changeCount(Number(e.target.value))} className="w-full border border-slate-300 rounded-xl p-3 text-sm bg-white">
+                      {[1,2,3,4].map((w) => <option key={w} value={w}>{w === 1 ? 'أسبوع (7 أيام)' : w === 2 ? 'أسبوعان (14 يوماً)' : `${w} أسابيع (${w*7} يوماً)`}</option>)}
+                    </select>
+                  ) : (
+                    <select value={count} onChange={(e) => changeCount(Number(e.target.value))} className="w-full border border-slate-300 rounded-xl p-3 text-sm bg-white">
+                      {[1,2,3,6,12].map((m) => <option key={m} value={m}>{m} {m===1?'شهر':'أشهر'}</option>)}
+                    </select>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-bold mb-1">المبلغ ({settings.currency})</label>
@@ -256,6 +309,7 @@
       const [name, setName] = useState('');
       const [phone, setPhone] = useState('');
       const [fb, setFb] = useState('');
+      const [cycle, setCycle] = useState('monthly');
       const [fee, setFee] = useState('');
       const [start, setStart] = useState(todayISO());
       const [end, setEnd] = useState(addMonthsISO(todayISO(), 1));
@@ -273,12 +327,14 @@
         setKey(genUUID());
         if (member) {
           setName(member.full_name); setPhone(member.phone); setFb(member.facebook_url);
+          setCycle(member.billing_cycle || 'monthly');
           setFee(String(member.monthly_fee)); setStart(member.subscription_start_date);
           setEnd(member.subscription_end_date); setFbStatus(member.fb_group_status);
           setNotes(member.notes || ''); setPayNow(false);
         } else {
           const t = todayISO();
           setName(''); setPhone(''); setFb('');
+          setCycle('monthly');
           setFee(String(settings.default_monthly_fee)); setStart(t);
           setEnd(addMonthsISO(t, settings.default_duration_months || 1));
           setFbStatus('in_group'); setNotes(''); setPayNow(true); setMethod('نقدي');
@@ -287,16 +343,31 @@
 
       if (!open) return null;
 
+      const handleCycleChange = (newCycle) => {
+        setCycle(newCycle);
+        if (!isEdit) {
+          if (newCycle === 'weekly') {
+            setFee(String(settings.default_weekly_fee ?? 15));
+            setEnd(addDaysISO(start, 7));
+          } else {
+            setFee(String(settings.default_monthly_fee ?? 50));
+            setEnd(addMonthsISO(start, settings.default_duration_months || 1));
+          }
+        }
+      };
+
       const submit = async (e) => {
         e.preventDefault();
         if (saving) return;
         setSaving(true);
         setErr('');
         try {
-          const numFee = Number(fee) || settings.default_monthly_fee;
+          const fallbackFee = cycle === 'weekly' ? (settings.default_weekly_fee ?? 15) : settings.default_monthly_fee;
+          const numFee = Number(fee) || fallbackFee;
           if (isEdit) {
             const { error } = await db.from('members').update({
               full_name: name.trim(), phone: phone.trim(), facebook_url: fb.trim(),
+              billing_cycle: cycle,
               monthly_fee: numFee, subscription_start_date: start, subscription_end_date: end,
               fb_group_status: fbStatus, notes: notes.trim(),
             }).eq('id', member.id);
@@ -305,20 +376,25 @@
           } else {
             const { data, error } = await db.from('members').insert({
               full_name: name.trim(), phone: phone.trim(), facebook_url: fb.trim(),
+              billing_cycle: cycle,
               monthly_fee: numFee, subscription_start_date: start, subscription_end_date: end,
               fb_group_status: fbStatus, notes: notes.trim(), status: 'active',
             }).select().single();
             if (error) throw error;
             if (payNow) {
+              const months = cycle === 'monthly' ? (settings.default_duration_months || 1) : 0;
+              const days = cycle === 'weekly' ? 7 : 0;
               const { error: pErr } = await db.rpc('record_payment_and_renew', {
                 p_member_id: data.id,
-                p_amount: numFee * (settings.default_duration_months || 1),
+                p_amount: cycle === 'weekly' ? numFee : numFee * months,
                 p_payment_date: start,
                 p_payment_method: method,
                 p_transaction_ref: '',
                 p_notes: 'دفعة تسجيل مشترك جديد',
-                p_duration_months: settings.default_duration_months || 1,
+                p_duration_months: months,
                 p_idempotency_key: key,
+                p_duration_days: days,
+                p_billing_cycle: cycle,
               });
               if (pErr) throw pErr;
             } else {
@@ -347,13 +423,20 @@
                 <label className="block text-xs font-bold mb-1">الاسم الكامل *</label>
                 <input required value={name} onChange={(e) => setName(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
               </div>
+              <div>
+                <label className="block text-xs font-bold mb-1">نوع الاشتراك</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={() => handleCycleChange('weekly')} className={`py-2.5 rounded-xl text-sm font-bold border ${cycle === 'weekly' ? 'bg-violet-700 text-white border-violet-700' : 'bg-white text-slate-700 border-slate-300'}`}>أسبوعي (7 أيام)</button>
+                  <button type="button" onClick={() => handleCycleChange('monthly')} className={`py-2.5 rounded-xl text-sm font-bold border ${cycle === 'monthly' ? 'bg-teal-700 text-white border-teal-700' : 'bg-white text-slate-700 border-slate-300'}`}>شهري</button>
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold mb-1">رقم الهاتف *</label>
                   <input required dir="ltr" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="0912345678" className="w-full border border-slate-300 rounded-xl p-3 text-sm text-right" />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold mb-1">الاشتراك ({settings.currency})</label>
+                  <label className="block text-xs font-bold mb-1">القيمة ({settings.currency})</label>
                   <input type="number" step="0.01" required value={fee} onChange={(e) => setFee(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
                 </div>
               </div>
@@ -364,7 +447,11 @@
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold mb-1">تاريخ البداية</label>
-                  <input type="date" required value={start} onChange={(e) => { setStart(e.target.value); if (!isEdit) setEnd(addMonthsISO(e.target.value, settings.default_duration_months || 1)); }} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+                  <input type="date" required value={start} onChange={(e) => {
+                    const v = e.target.value;
+                    setStart(v);
+                    if (!isEdit) setEnd(cycle === 'weekly' ? addDaysISO(v, 7) : addMonthsISO(v, settings.default_duration_months || 1));
+                  }} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
                 </div>
                 <div>
                   <label className="block text-xs font-bold mb-1">تاريخ الانتهاء</label>
@@ -521,6 +608,7 @@
 
       const [search, setSearch] = useState('');
       const [statusFilter, setStatusFilter] = useState('all');
+      const [cycleFilter, setCycleFilter] = useState('all');
       const [showArchived, setShowArchived] = useState(false);
       const [sortBy, setSortBy] = useState('end_date');
       const [alertFilter, setAlertFilter] = useState('all');
@@ -548,14 +636,12 @@
             .eq('user_id', session.user.id)
             .maybeSingle();
 
-          if (aErr) {
-            throw new Error('خطأ في قراءة جدول admin_users: ' + aErr.message);
-          }
+          if (aErr) throw new Error('خطأ في قراءة جدول admin_users: ' + aErr.message);
           if (!adm) {
             const uEmail = session.user.email || '';
             const uId = session.user.id || '';
             await db.auth.signOut();
-            setAuthError(`الحساب (${uEmail}) غير مضاف كمدير في جدول admin_users. انسخ هذا UID وأضفه في SQL Editor: ${uId}`);
+            setAuthError(`الحساب (${uEmail}) غير مضاف كمدير في جدول admin_users. UID: ${uId}`);
             return;
           }
 
@@ -585,12 +671,8 @@
       };
 
       useEffect(() => {
-        if (session) {
-          loadAll();
-        } else {
-          setSettings(null);
-          setStats(null);
-        }
+        if (session) loadAll();
+        else { setSettings(null); setStats(null); }
       }, [session, showArchived]);
 
       useEffect(() => {
@@ -618,14 +700,7 @@
       if (!sbConfig.url || !sbConfig.key) return <SetupScreen onSave={(url, key) => setSbConfig({ url, key })} />;
       if (!ready) return <div className="min-h-screen flex items-center justify-center">جاري التحميل...</div>;
       if (!session) {
-        return (
-          <LoginScreen
-            db={db}
-            externalError={authError}
-            onClearExternalError={() => setAuthError('')}
-            onResetConfig={resetConfig}
-          />
-        );
+        return <LoginScreen db={db} externalError={authError} onClearExternalError={() => setAuthError('')} onResetConfig={resetConfig} />;
       }
       if (loadError) {
         return (
@@ -647,7 +722,11 @@
       const openProfile = (id) => { setSelectedMemberId(id); setTab('profile'); };
 
       const filteredMembers = members
-        .filter((m) => (statusFilter === 'all' || m.status === statusFilter) && (!search.trim() || [m.full_name, m.phone, m.facebook_url].some((v) => (v || '').toLowerCase().includes(search.trim().toLowerCase()))))
+        .filter((m) =>
+          (statusFilter === 'all' || m.status === statusFilter) &&
+          (cycleFilter === 'all' || (m.billing_cycle || 'monthly') === cycleFilter) &&
+          (!search.trim() || [m.full_name, m.phone, m.facebook_url].some((v) => (v || '').toLowerCase().includes(search.trim().toLowerCase())))
+        )
         .sort((a, b) => sortBy === 'fee' ? b.monthly_fee - a.monthly_fee : sortBy === 'last_payment' ? (b.last_payment_date || '').localeCompare(a.last_payment_date || '') : a.subscription_end_date.localeCompare(b.subscription_end_date));
 
       const alertList = members.filter((m) => !m.is_archived && m.status !== 'suspended').filter((m) => {
@@ -759,6 +838,11 @@
                     {[['all','الكل'],['active','نشط'],['expiring_soon','قريب الانتهاء'],['expired','منتهي'],['suspended','موقوف']].map(([k,l]) => (
                       <button key={k} onClick={() => setStatusFilter(k)} className={`px-3 py-1.5 rounded-xl text-xs font-bold ${statusFilter === k ? 'bg-teal-700 text-white' : 'bg-slate-100'}`}>{l}</button>
                     ))}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {[['all','كل الأنظمة'],['weekly','الأسبوعي'],['monthly','الشهري']].map(([k,l]) => (
+                      <button key={k} onClick={() => setCycleFilter(k)} className={`px-3 py-1.5 rounded-xl text-xs font-bold ${cycleFilter === k ? 'bg-violet-700 text-white' : 'bg-slate-100'}`}>{l}</button>
+                    ))}
                     <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="mr-auto border rounded-xl px-2.5 py-1.5 text-xs bg-white font-bold">
                       <option value="end_date">ترتيب: الانتهاء</option>
                       <option value="fee">ترتيب: القيمة</option>
@@ -777,7 +861,10 @@
                           <div className="font-extrabold text-base text-teal-900">{m.full_name}</div>
                           <div className="text-xs text-slate-500" dir="ltr">{m.phone}</div>
                         </div>
-                        <Badge type={m.status} map={STATUS_LABELS} />
+                        <div className="flex gap-1.5">
+                          <Badge type={m.billing_cycle || 'monthly'} map={CYCLE_LABELS} />
+                          <Badge type={m.status} map={STATUS_LABELS} />
+                        </div>
                       </div>
                       <div className="text-xs text-slate-600 flex justify-between bg-slate-50 p-2.5 rounded-xl">
                         <span>ينتهي: <b>{formatDate(m.subscription_end_date)}</b></span>
@@ -806,7 +893,10 @@
                       <div className="text-sm text-slate-500" dir="ltr">{activeMember.phone}</div>
                     </div>
                     <div className="flex flex-col gap-1 items-end">
-                      <Badge type={activeMember.status} map={STATUS_LABELS} />
+                      <div className="flex gap-1.5">
+                        <Badge type={activeMember.billing_cycle || 'monthly'} map={CYCLE_LABELS} />
+                        <Badge type={activeMember.status} map={STATUS_LABELS} />
+                      </div>
                       <Badge type={activeMember.fb_group_status} map={FB_LABELS} />
                     </div>
                   </div>
@@ -839,7 +929,13 @@
                   <h3 className="font-bold mb-3">سجل المدفوعات ({profilePayments.length})</h3>
                   {profilePayments.map((p) => (
                     <div key={p.id} className="py-2.5 border-b last:border-0 flex justify-between text-sm">
-                      <div><b>{formatMoney(p.amount, settings.currency)}</b><div className="text-xs text-slate-500">{formatDate(p.payment_date)} • {p.payment_method}</div></div>
+                      <div>
+                        <b>{formatMoney(p.amount, settings.currency)}</b>{' '}
+                        <span className="text-xs text-slate-500">
+                          ({p.duration_days > 0 ? `${p.duration_days} يوم` : `${p.duration_months} شهر`})
+                        </span>
+                        <div className="text-xs text-slate-500">{formatDate(p.payment_date)} • {p.payment_method}</div>
+                      </div>
                       <span className="text-xs font-bold text-emerald-700">{p.is_renewal ? 'تجديد' : 'أول دفعة'}</span>
                     </div>
                   ))}
@@ -860,7 +956,10 @@
                     <div key={m.id} className="bg-white rounded-2xl p-4 border border-slate-200 space-y-2">
                       <div className="flex justify-between items-center">
                         <b onClick={() => openProfile(m.id)} className="cursor-pointer">{m.full_name}</b>
-                        <Badge type={m.status} map={STATUS_LABELS} />
+                        <div className="flex gap-1.5">
+                          <Badge type={m.billing_cycle || 'monthly'} map={CYCLE_LABELS} />
+                          <Badge type={m.status} map={STATUS_LABELS} />
+                        </div>
                       </div>
                       <div className="text-xs text-slate-500">تاريخ الانتهاء: {formatDate(m.subscription_end_date)}</div>
                       <div className="flex flex-wrap gap-2 pt-1">
@@ -880,7 +979,7 @@
               <div className="space-y-4">
                 <div className="flex justify-between items-center">
                   <h2 className="text-lg font-extrabold">التقارير المالية</h2>
-                  <button onClick={() => downloadCSV(`تقرير-${repStart}-${repEnd}.csv`, ['المشترك','الهاتف','المبلغ','التاريخ','الطريقة','النوع'], repPayments.map((p) => [p.members?.full_name, p.members?.phone, p.amount, p.payment_date, p.payment_method, p.is_renewal ? 'تجديد' : 'جديد']))} className="px-4 py-2.5 rounded-xl bg-emerald-700 text-white text-xs font-bold">تصدير Excel CSV</button>
+                  <button onClick={() => downloadCSV(`تقرير-${repStart}-${repEnd}.csv`, ['المشترك','الهاتف','المبلغ','النظام','المدة','التاريخ','الطريقة','النوع'], repPayments.map((p) => [p.members?.full_name, p.members?.phone, p.amount, p.billing_cycle === 'weekly' ? 'أسبوعي' : 'شهري', p.duration_days > 0 ? `${p.duration_days} يوم` : `${p.duration_months} شهر`, p.payment_date, p.payment_method, p.is_renewal ? 'تجديد' : 'جديد']))} className="px-4 py-2.5 rounded-xl bg-emerald-700 text-white text-xs font-bold">تصدير Excel CSV</button>
                 </div>
                 {report && (
                   <div className="grid grid-cols-3 gap-3">
@@ -926,7 +1025,7 @@
     }
 
     function SettingsView({ settings, db, onSaved, onResetConfig }) {
-      const [form, setForm] = useState(settings);
+      const [form, setForm] = useState({ ...settings, default_weekly_fee: settings.default_weekly_fee ?? 15 });
       const [msg, setMsg] = useState('');
       const save = async (e) => {
         e.preventDefault();
@@ -934,6 +1033,7 @@
           group_name: form.group_name,
           currency: form.currency,
           default_monthly_fee: Number(form.default_monthly_fee),
+          default_weekly_fee: Number(form.default_weekly_fee),
           default_duration_months: Number(form.default_duration_months),
           alert_days_before_expiry: Number(form.alert_days_before_expiry),
           whatsapp_template: form.whatsapp_template,
@@ -952,9 +1052,10 @@
             <div><label className="text-xs font-bold">اسم المجموعة</label><input value={form.group_name} onChange={(e) => setForm({ ...form, group_name: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
             <div className="grid grid-cols-2 gap-3">
               <div><label className="text-xs font-bold">العملة</label><input value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
-              <div><label className="text-xs font-bold">قيمة الاشتراك الافتراضية</label><input type="number" value={form.default_monthly_fee} onChange={(e) => setForm({ ...form, default_monthly_fee: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
-              <div><label className="text-xs font-bold">المدة الافتراضية (أشهر)</label><input type="number" min="1" value={form.default_duration_months} onChange={(e) => setForm({ ...form, default_duration_months: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
-              <div><label className="text-xs font-bold">أيام التنبيه قبل الانتهاء</label><input type="number" min="1" value={form.alert_days_before_expiry} onChange={(e) => setForm({ ...form, alert_days_before_expiry: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
+              <div><label className="text-xs font-bold">قيمة الاشتراك الأسبوعي</label><input type="number" step="0.01" value={form.default_weekly_fee} onChange={(e) => setForm({ ...form, default_weekly_fee: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
+              <div><label className="text-xs font-bold">قيمة الاشتراك الشهري</label><input type="number" step="0.01" value={form.default_monthly_fee} onChange={(e) => setForm({ ...form, default_monthly_fee: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
+              <div><label className="text-xs font-bold">المدة الشهرية الافتراضية</label><input type="number" min="1" value={form.default_duration_months} onChange={(e) => setForm({ ...form, default_duration_months: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
+              <div className="col-span-2"><label className="text-xs font-bold">أيام التنبيه قبل الانتهاء</label><input type="number" min="1" value={form.alert_days_before_expiry} onChange={(e) => setForm({ ...form, alert_days_before_expiry: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
             </div>
             <div><label className="text-xs font-bold">رسالة واتساب</label><textarea rows="3" value={form.whatsapp_template} onChange={(e) => setForm({ ...form, whatsapp_template: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
             <button type="submit" className="w-full py-3 rounded-xl bg-teal-700 text-white font-bold">حفظ الإعدادات</button>
