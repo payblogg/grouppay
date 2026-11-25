@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0f766e" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>مدير اشتراكات المجموعة</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <style>
+    body { font-family: 'Cairo', system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    const DEFAULT_URL = "https://vpkiwekxfhwksvxnzgsz.supabase.co";
+    const DEFAULT_KEY = "sb_publishable_u6ZkcDmC5lu-ZiPhKRIRrA_zCyQozeq";
+
+    const genUUID = () =>
+      (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+            const r = (Math.random() * 16) | 0;
+            return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+          });
+
+    const todayISO = () => {
+      const now = new Date();
+      return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    };
+
+    const addMonthsISO = (dateISO, months) => {
+      const d = new Date(dateISO + 'T00:00:00');
+      d.setMonth(d.getMonth() + Number(months || 1));
+      return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    };
+
+    const daysRemaining = (endISO) => {
+      const t = new Date(todayISO() + 'T00:00:00').getTime();
+      const e = new Date(endISO + 'T00:00:00').getTime();
+      return Math.round((e - t) / 86400000);
+    };
+
+    const formatMoney = (val, cur = 'د.ل') =>
+      `${Number(val || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} ${cur}`;
+
+    const formatDate = (str) => {
+      if (!str) return '—';
+      const d = new Date(str + (str.length === 10 ? 'T00:00:00' : ''));
+      return isNaN(d.getTime()) ? str : d.toLocaleDateString('ar-LY', { year: 'numeric', month: '2-digit', day: '2-digit' });
+    };
+
+    const waLink = (phone, msg) => {
+      let c = String(phone || '').replace(/[^\d+]/g, '');
+      if (c.startsWith('+')) c = c.slice(1);
+      if (c.startsWith('00')) c = c.slice(2);
+      if (c.startsWith('09') && c.length === 10) c = '218' + c.slice(1);
+      return `https://wa.me/${c}?text=${encodeURIComponent(msg)}`;
+    };
+
+    const downloadCSV = (filename, headers, rows) => {
+      const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      const csv = '\uFEFF' + [headers.map(esc).join(','), ...rows.map((r) => r.map(esc).join(','))].join('\n');
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+      a.download = filename;
+      a.click();
+    };
+
+    const downloadJSON = (filename, obj) => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' }));
+      a.download = filename;
+      a.click();
+    };
+
+    const STATUS_LABELS = {
+      active: ['نشط', 'bg-emerald-100 text-emerald-800 border-emerald-200'],
+      expiring_soon: ['قريب الانتهاء', 'bg-amber-100 text-amber-800 border-amber-200'],
+      expired: ['منتهي', 'bg-rose-100 text-rose-800 border-rose-200'],
+      suspended: ['موقوف', 'bg-slate-200 text-slate-700 border-slate-300'],
+    };
+
+    const FB_LABELS = {
+      in_group: ['موجود في المجموعة', 'bg-blue-50 text-blue-700 border-blue-200'],
+      removed: ['تمت إزالته', 'bg-slate-100 text-slate-600 border-slate-200'],
+      left: ['غادر المجموعة', 'bg-purple-50 text-purple-700 border-purple-200'],
+    };
+
+    const Badge = ({ type, map }) => {
+      const [label, cls] = map[type] || Object.values(map)[0];
+      return <span className={`inline-block px-2.5 py-1 rounded-full text-xs font-bold border ${cls}`}>{label}</span>;
+    };
+
+    function ConfirmModal({ open, title, msg, danger, loading, onOk, onCancel }) {
+      if (!open) return null;
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-xl">
+            <h3 className="text-lg font-bold text-slate-900">{title}</h3>
+            <p className="text-sm text-slate-600 mt-2 leading-relaxed">{msg}</p>
+            <div className="mt-6 flex gap-3 justify-end">
+              <button onClick={onCancel} disabled={loading} className="px-4 py-2.5 rounded-xl border border-slate-200 font-bold text-sm">إلغاء</button>
+              <button onClick={onOk} disabled={loading} className={`px-5 py-2.5 rounded-xl font-bold text-sm text-white ${danger ? 'bg-rose-600' : 'bg-teal-700'}`}>
+                {loading ? 'جاري التنفيذ...' : 'تأكيد'}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function WhatsAppModal({ open, member, defaultMsg, onClose }) {
+      const [msg, setMsg] = useState(defaultMsg);
+      useEffect(() => { if (open) setMsg(defaultMsg); }, [open, defaultMsg]);
+      if (!open || !member) return null;
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-end sm:items-center justify-center sm:p-4">
+          <div className="bg-white w-full sm:max-w-lg rounded-t-3xl sm:rounded-2xl p-6 shadow-xl space-y-4">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h3 className="font-bold text-lg">إرسال تذكير واتساب</h3>
+              <button onClick={onClose} className="px-3 py-1 rounded-lg bg-slate-100 font-bold">✕</button>
+            </div>
+            <div className="text-sm text-slate-600">المشترك: <b className="text-slate-900">{member.full_name}</b> ({member.phone})</div>
+            <textarea rows="4" value={msg} onChange={(e) => setMsg(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+            <div className="flex gap-3">
+              <button onClick={() => { window.open(waLink(member.phone, msg), '_blank'); onClose(); }} className="flex-1 py-3 rounded-xl bg-emerald-600 text-white font-bold">
+                فتح واتساب وإرسال
+              </button>
+              <button onClick={onClose} className="px-5 py-3 rounded-xl border border-slate-200 font-bold">إلغاء</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function PaymentModal({ open, member, settings, db, onDone, onClose }) {
+      const [amount, setAmount] = useState('');
+      const [months, setMonths] = useState(1);
+      const [date, setDate] = useState(todayISO());
+      const [method, setMethod] = useState('نقدي');
+      const [ref, setRef] = useState('');
+      const [notes, setNotes] = useState('');
+      const [key, setKey] = useState('');
+      const [saving, setSaving] = useState(false);
+      const [err, setErr] = useState('');
+
+      useEffect(() => {
+        if (open && member) {
+          const m = settings.default_duration_months || 1;
+          setMonths(m);
+          setAmount(String((member.monthly_fee || settings.default_monthly_fee) * m));
+          setDate(todayISO());
+          setMethod('نقدي');
+          setRef('');
+          setNotes('');
+          setErr('');
+          setKey(genUUID());
+        }
+      }, [open, member]);
+
+      if (!open || !member) return null;
+
+      const submit = async (e) => {
+        e.preventDefault();
+        if (saving) return;
+        setSaving(true);
+        setErr('');
+        try {
+          const { error } = await db.rpc('record_payment_and_renew', {
+            p_member_id: member.id,
+            p_amount: Number(amount),
+            p_payment_date: date,
+            p_payment_method: method,
+            p_transaction_ref: ref,
+            p_notes: notes,
+            p_duration_months: Number(months),
+            p_idempotency_key: key,
+          });
+          if (error) throw error;
+          onDone();
+          onClose();
+        } catch (ex) {
+          setErr(ex.message || 'حدث خطأ');
+        } finally {
+          setSaving(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-end sm:items-center justify-center sm:p-4">
+          <div className="bg-white w-full sm:max-w-lg max-h-[90vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl p-6 shadow-xl">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h3 className="font-bold text-lg">تسجيل دفعة وتجديد</h3>
+              <button onClick={onClose} className="px-3 py-1 rounded-lg bg-slate-100 font-bold">✕</button>
+            </div>
+            <form onSubmit={submit} className="mt-4 space-y-3.5">
+              <div className="bg-teal-50 border border-teal-100 rounded-xl p-3 text-sm">
+                <div className="font-bold text-teal-900">{member.full_name}</div>
+                <div className="text-teal-700">الاشتراك الشهري: {formatMoney(member.monthly_fee, settings.currency)}</div>
+              </div>
+              {err && <div className="p-3 rounded-xl bg-rose-50 text-rose-700 text-sm font-bold">{err}</div>}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold mb-1">المدة</label>
+                  <select value={months} onChange={(e) => { const m = Number(e.target.value); setMonths(m); setAmount(String(member.monthly_fee * m)); }} className="w-full border border-slate-300 rounded-xl p-3 text-sm bg-white">
+                    {[1,2,3,6,12].map((m) => <option key={m} value={m}>{m} {m===1?'شهر':'أشهر'}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold mb-1">المبلغ ({settings.currency})</label>
+                  <input type="number" step="0.01" required value={amount} onChange={(e) => setAmount(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold mb-1">تاريخ الدفع</label>
+                  <input type="date" required value={date} onChange={(e) => setDate(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold mb-1">طريقة الدفع</label>
+                  <select value={method} onChange={(e) => setMethod(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm bg-white">
+                    <option value="نقدي">نقدي</option>
+                    <option value="تحويل مصرفي">تحويل مصرفي</option>
+                    <option value="بطاقة / رصيد">بطاقة / رصيد</option>
+                    <option value="محفظة إلكترونية">محفظة إلكترونية</option>
+                  </select>
+                </div>
+              </div>
+              <input type="text" placeholder="رقم العملية (اختياري)" value={ref} onChange={(e) => setRef(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+              <input type="text" placeholder="ملاحظات (اختياري)" value={notes} onChange={(e) => setNotes(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+              <div className="flex gap-3 pt-2">
+                <button type="submit" disabled={saving} className="flex-1 py-3.5 rounded-xl bg-teal-700 text-white font-bold">{saving ? 'جاري الحفظ...' : 'تأكيد وتسجيل الدفعة'}</button>
+                <button type="button" onClick={onClose} className="px-5 py-3.5 rounded-xl border border-slate-200 font-bold">إلغاء</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function MemberModal({ open, member, settings, db, onDone, onClose }) {
+      const isEdit = Boolean(member);
+      const [name, setName] = useState('');
+      const [phone, setPhone] = useState('');
+      const [fb, setFb] = useState('');
+      const [fee, setFee] = useState('');
+      const [start, setStart] = useState(todayISO());
+      const [end, setEnd] = useState(addMonthsISO(todayISO(), 1));
+      const [fbStatus, setFbStatus] = useState('in_group');
+      const [notes, setNotes] = useState('');
+      const [payNow, setPayNow] = useState(true);
+      const [method, setMethod] = useState('نقدي');
+      const [key, setKey] = useState('');
+      const [saving, setSaving] = useState(false);
+      const [err, setErr] = useState('');
+
+      useEffect(() => {
+        if (!open) return;
+        setErr('');
+        setKey(genUUID());
+        if (member) {
+          setName(member.full_name); setPhone(member.phone); setFb(member.facebook_url);
+          setFee(String(member.monthly_fee)); setStart(member.subscription_start_date);
+          setEnd(member.subscription_end_date); setFbStatus(member.fb_group_status);
+          setNotes(member.notes || ''); setPayNow(false);
+        } else {
+          const t = todayISO();
+          setName(''); setPhone(''); setFb('');
+          setFee(String(settings.default_monthly_fee)); setStart(t);
+          setEnd(addMonthsISO(t, settings.default_duration_months || 1));
+          setFbStatus('in_group'); setNotes(''); setPayNow(true); setMethod('نقدي');
+        }
+      }, [open, member]);
+
+      if (!open) return null;
+
+      const submit = async (e) => {
+        e.preventDefault();
+        if (saving) return;
+        setSaving(true);
+        setErr('');
+        try {
+          const numFee = Number(fee) || settings.default_monthly_fee;
+          if (isEdit) {
+            const { error } = await db.from('members').update({
+              full_name: name.trim(), phone: phone.trim(), facebook_url: fb.trim(),
+              monthly_fee: numFee, subscription_start_date: start, subscription_end_date: end,
+              fb_group_status: fbStatus, notes: notes.trim(),
+            }).eq('id', member.id);
+            if (error) throw error;
+            await db.rpc('refresh_subscription_statuses');
+          } else {
+            const { data, error } = await db.from('members').insert({
+              full_name: name.trim(), phone: phone.trim(), facebook_url: fb.trim(),
+              monthly_fee: numFee, subscription_start_date: start, subscription_end_date: end,
+              fb_group_status: fbStatus, notes: notes.trim(), status: 'active',
+            }).select().single();
+            if (error) throw error;
+            if (payNow) {
+              const { error: pErr } = await db.rpc('record_payment_and_renew', {
+                p_member_id: data.id,
+                p_amount: numFee * (settings.default_duration_months || 1),
+                p_payment_date: start,
+                p_payment_method: method,
+                p_transaction_ref: '',
+                p_notes: 'دفعة تسجيل مشترك جديد',
+                p_duration_months: settings.default_duration_months || 1,
+                p_idempotency_key: key,
+              });
+              if (pErr) throw pErr;
+            } else {
+              await db.rpc('refresh_subscription_statuses');
+            }
+          }
+          onDone();
+          onClose();
+        } catch (ex) {
+          setErr(ex.message || 'تعذر الحفظ');
+        } finally {
+          setSaving(false);
+        }
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-end sm:items-center justify-center sm:p-4">
+          <div className="bg-white w-full sm:max-w-lg max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-2xl p-6 shadow-xl">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h3 className="font-bold text-lg">{isEdit ? 'تعديل مشترك' : 'إضافة مشترك جديد'}</h3>
+              <button onClick={onClose} className="px-3 py-1 rounded-lg bg-slate-100 font-bold">✕</button>
+            </div>
+            <form onSubmit={submit} className="mt-4 space-y-3">
+              {err && <div className="p-3 rounded-xl bg-rose-50 text-rose-700 text-sm font-bold">{err}</div>}
+              <div>
+                <label className="block text-xs font-bold mb-1">الاسم الكامل *</label>
+                <input required value={name} onChange={(e) => setName(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold mb-1">رقم الهاتف *</label>
+                  <input required dir="ltr" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="0912345678" className="w-full border border-slate-300 rounded-xl p-3 text-sm text-right" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold mb-1">الاشتراك ({settings.currency})</label>
+                  <input type="number" step="0.01" required value={fee} onChange={(e) => setFee(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold mb-1">رابط حساب فيسبوك</label>
+                <input dir="ltr" value={fb} onChange={(e) => setFb(e.target.value)} placeholder="https://facebook.com/..." className="w-full border border-slate-300 rounded-xl p-3 text-sm text-right" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold mb-1">تاريخ البداية</label>
+                  <input type="date" required value={start} onChange={(e) => { setStart(e.target.value); if (!isEdit) setEnd(addMonthsISO(e.target.value, settings.default_duration_months || 1)); }} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold mb-1">تاريخ الانتهاء</label>
+                  <input type="date" required value={end} onChange={(e) => setEnd(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold mb-1">الحالة في مجموعة فيسبوك</label>
+                <select value={fbStatus} onChange={(e) => setFbStatus(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm bg-white">
+                  <option value="in_group">موجود في المجموعة</option>
+                  <option value="removed">تمت إزالة العضو</option>
+                  <option value="left">غادر المجموعة</option>
+                </select>
+              </div>
+              {!isEdit && (
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+                  <label className="flex items-center gap-2 text-sm font-bold">
+                    <input type="checkbox" checked={payNow} onChange={(e) => setPayNow(e.target.checked)} className="w-4 h-4 accent-teal-700" />
+                    تسجيل أول دفعة مع الإضافة فوراً
+                  </label>
+                  {payNow && (
+                    <select value={method} onChange={(e) => setMethod(e.target.value)} className="w-full border border-slate-300 rounded-xl p-2.5 text-sm bg-white">
+                      <option value="نقدي">نقدي</option>
+                      <option value="تحويل مصرفي">تحويل مصرفي</option>
+                      <option value="بطاقة / رصيد">بطاقة / رصيد</option>
+                      <option value="محفظة إلكترونية">محفظة إلكترونية</option>
+                    </select>
+                  )}
+                </div>
+              )}
+              <textarea rows="2" placeholder="ملاحظات إدارية" value={notes} onChange={(e) => setNotes(e.target.value)} className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+              <div className="flex gap-3 pt-2">
+                <button type="submit" disabled={saving} className="flex-1 py-3.5 rounded-xl bg-teal-700 text-white font-bold">{saving ? 'جاري الحفظ...' : isEdit ? 'حفظ التعديلات' : 'إضافة المشترك'}</button>
+                <button type="button" onClick={onClose} className="px-5 py-3.5 rounded-xl border border-slate-200 font-bold">إلغاء</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function SetupScreen({ onSave }) {
+      const [url, setUrl] = useState('');
+      const [key, setKey] = useState('');
+      const [err, setErr] = useState('');
+      const save = (e) => {
+        e.preventDefault();
+        if (!url.trim().startsWith('https://') || key.trim().length < 20) {
+          setErr('تأكد من نسخ رابط Project URL ومفتاح Publishable key / anon بشكل صحيح');
+          return;
+        }
+        localStorage.setItem('gsm_sb_url', url.trim());
+        localStorage.setItem('gsm_sb_key', key.trim());
+        onSave(url.trim(), key.trim());
+      };
+      return (
+        <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+          <div className="bg-white max-w-md w-full rounded-3xl p-6 shadow-lg border border-slate-200 space-y-4">
+            <h1 className="text-xl font-extrabold text-teal-800 text-center">ربط قاعدة البيانات (مرة واحدة)</h1>
+            <p className="text-xs text-slate-500 text-center leading-relaxed">انسخ هذه القيم من زر Connect في Supabase</p>
+            {err && <div className="p-3 rounded-xl bg-rose-50 text-rose-700 text-xs font-bold">{err}</div>}
+            <form onSubmit={save} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold mb-1">Project URL</label>
+                <input required dir="ltr" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://xxxx.supabase.co" className="w-full border border-slate-300 rounded-xl p-3 text-sm text-right" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold mb-1">Publishable key (أو anon)</label>
+                <textarea required rows="3" dir="ltr" value={key} onChange={(e) => setKey(e.target.value)} placeholder="sb_publishable_..." className="w-full border border-slate-300 rounded-xl p-3 text-xs text-right" />
+              </div>
+              <button type="submit" className="w-full py-3.5 rounded-xl bg-teal-700 text-white font-bold">حفظ والانتقال لتسجيل الدخول</button>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function LoginScreen({ db, externalError, onClearExternalError, onResetConfig }) {
+      const [email, setEmail] = useState('');
+      const [password, setPassword] = useState('');
+      const [loading, setLoading] = useState(false);
+      const [err, setErr] = useState('');
+      const shownError = err || externalError;
+
+      const login = async (e) => {
+        e.preventDefault();
+        setLoading(true);
+        setErr('');
+        onClearExternalError();
+        try {
+          const { error } = await db.auth.signInWithPassword({ email: email.trim(), password });
+          if (error) throw error;
+        } catch (ex) {
+          setErr(ex.message || 'خطأ في تسجيل الدخول');
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      return (
+        <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+          <div className="bg-white max-w-md w-full rounded-3xl p-7 shadow-lg border border-slate-200">
+            <h1 className="text-2xl font-extrabold text-center text-teal-800">مدير اشتراكات المجموعة</h1>
+            <p className="text-center text-xs text-slate-500 mt-1">دخول خاص بالمدير فقط</p>
+            <form onSubmit={login} className="mt-6 space-y-4">
+              {shownError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold leading-relaxed break-words">
+                  {shownError}
+                </div>
+              )}
+              <input type="email" dir="ltr" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="البريد الإلكتروني" className="w-full border border-slate-300 rounded-xl p-3.5 text-sm text-right" />
+              <input type="password" dir="ltr" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="كلمة المرور" className="w-full border border-slate-300 rounded-xl p-3.5 text-sm text-right" />
+              <button type="submit" disabled={loading} className="w-full py-3.5 rounded-xl bg-teal-700 text-white font-bold">
+                {loading ? 'جاري التحقق...' : 'تسجيل الدخول'}
+              </button>
+            </form>
+            <button type="button" onClick={onResetConfig} className="mt-4 w-full text-center text-xs text-slate-400 underline">
+              تغيير إعدادات ربط Supabase
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [sbConfig, setSbConfig] = useState(() => ({
+        url: DEFAULT_URL || localStorage.getItem('gsm_sb_url') || '',
+        key: DEFAULT_KEY || localStorage.getItem('gsm_sb_key') || '',
+      }));
+
+      const db = useMemo(() => {
+        if (!sbConfig.url || !sbConfig.key) return null;
+        return window.supabase.createClient(sbConfig.url, sbConfig.key);
+      }, [sbConfig]);
+
+      const [session, setSession] = useState(null);
+      const [ready, setReady] = useState(false);
+      const [authError, setAuthError] = useState('');
+      const [loadError, setLoadError] = useState('');
+
+      const [tab, setTab] = useState('dashboard');
+      const [selectedMemberId, setSelectedMemberId] = useState(null);
+
+      const [settings, setSettings] = useState(null);
+      const [stats, setStats] = useState(null);
+      const [members, setMembers] = useState([]);
+      const [recentPayments, setRecentPayments] = useState([]);
+
+      const [memberModal, setMemberModal] = useState({ open: false, member: null });
+      const [payMember, setPayMember] = useState(null);
+      const [waMember, setWaMember] = useState(null);
+      const [confirmBox, setConfirmBox] = useState(null);
+      const [busy, setBusy] = useState(false);
+
+      const [search, setSearch] = useState('');
+      const [statusFilter, setStatusFilter] = useState('all');
+      const [showArchived, setShowArchived] = useState(false);
+      const [sortBy, setSortBy] = useState('end_date');
+      const [alertFilter, setAlertFilter] = useState('all');
+
+      const [repStart, setRepStart] = useState(todayISO().slice(0, 8) + '01');
+      const [repEnd, setRepEnd] = useState(todayISO());
+      const [report, setReport] = useState(null);
+      const [repPayments, setRepPayments] = useState([]);
+      const [profilePayments, setProfilePayments] = useState([]);
+
+      useEffect(() => {
+        if (!db) { setReady(true); return; }
+        db.auth.getSession().then(({ data }) => { setSession(data.session); setReady(true); });
+        const { data: sub } = db.auth.onAuthStateChange((_e, s) => setSession(s));
+        return () => sub.subscription.unsubscribe();
+      }, [db]);
+
+      const loadAll = async () => {
+        if (!db || !session) return;
+        setLoadError('');
+        try {
+          const { data: adm, error: aErr } = await db
+            .from('admin_users')
+            .select('user_id')
+            .eq('user_id', session.user.id)
+            .maybeSingle();
+
+          if (aErr) {
+            throw new Error('خطأ في قراءة جدول admin_users: ' + aErr.message);
+          }
+          if (!adm) {
+            const uEmail = session.user.email || '';
+            const uId = session.user.id || '';
+            await db.auth.signOut();
+            setAuthError(`الحساب (${uEmail}) غير مضاف كمدير في جدول admin_users. انسخ هذا UID وأضفه في SQL Editor: ${uId}`);
+            return;
+          }
+
+          const { error: rErr } = await db.rpc('refresh_subscription_statuses');
+          if (rErr) throw new Error('خطأ في refresh_subscription_statuses: ' + rErr.message);
+
+          const [setRes, stRes, memRes, payRes] = await Promise.all([
+            db.from('app_settings').select('*').eq('id', 1).single(),
+            db.rpc('get_dashboard_stats'),
+            showArchived
+              ? db.from('members').select('*').order('subscription_end_date')
+              : db.from('members').select('*').eq('is_archived', false).order('subscription_end_date'),
+            db.from('payments').select('*, members(id, full_name, phone)').order('payment_date', { ascending: false }).limit(8),
+          ]);
+          if (setRes.error) throw new Error('خطأ في app_settings: ' + setRes.error.message);
+          if (stRes.error) throw new Error('خطأ في get_dashboard_stats: ' + stRes.error.message);
+          if (memRes.error) throw new Error('خطأ في members: ' + memRes.error.message);
+          if (payRes.error) throw new Error('خطأ في payments: ' + payRes.error.message);
+
+          setSettings(setRes.data);
+          setStats(stRes.data);
+          setMembers(memRes.data || []);
+          setRecentPayments(payRes.data || []);
+        } catch (ex) {
+          setLoadError(ex.message || 'حدث خطأ أثناء تحميل البيانات');
+        }
+      };
+
+      useEffect(() => {
+        if (session) {
+          loadAll();
+        } else {
+          setSettings(null);
+          setStats(null);
+        }
+      }, [session, showArchived]);
+
+      useEffect(() => {
+        if (!db || !session || tab !== 'reports') return;
+        Promise.all([
+          db.rpc('get_financial_report', { p_start_date: repStart, p_end_date: repEnd }),
+          db.from('payments').select('*, members(id, full_name, phone)').gte('payment_date', repStart).lte('payment_date', repEnd).order('payment_date', { ascending: false }),
+        ]).then(([r, p]) => {
+          if (r.data) setReport(r.data);
+          if (p.data) setRepPayments(p.data);
+        });
+      }, [tab, repStart, repEnd, session]);
+
+      useEffect(() => {
+        if (!db || !session || !selectedMemberId) return;
+        db.from('payments').select('*').eq('member_id', selectedMemberId).order('payment_date', { ascending: false }).then(({ data }) => setProfilePayments(data || []));
+      }, [selectedMemberId, members]);
+
+      const resetConfig = () => {
+        localStorage.removeItem('gsm_sb_url');
+        localStorage.removeItem('gsm_sb_key');
+        setSbConfig({ url: '', key: '' });
+      };
+
+      if (!sbConfig.url || !sbConfig.key) return <SetupScreen onSave={(url, key) => setSbConfig({ url, key })} />;
+      if (!ready) return <div className="min-h-screen flex items-center justify-center">جاري التحميل...</div>;
+      if (!session) {
+        return (
+          <LoginScreen
+            db={db}
+            externalError={authError}
+            onClearExternalError={() => setAuthError('')}
+            onResetConfig={resetConfig}
+          />
+        );
+      }
+      if (loadError) {
+        return (
+          <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+            <div className="bg-white max-w-md w-full rounded-3xl p-6 shadow-lg border border-rose-200 space-y-4">
+              <h2 className="text-lg font-bold text-rose-700">تعذر تحميل بيانات الإدارة</h2>
+              <div className="p-3 rounded-xl bg-rose-50 text-rose-800 text-xs font-bold break-words">{loadError}</div>
+              <div className="flex gap-3">
+                <button onClick={loadAll} className="flex-1 py-3 rounded-xl bg-teal-700 text-white font-bold text-sm">إعادة المحاولة</button>
+                <button onClick={() => db.auth.signOut()} className="px-4 py-3 rounded-xl border font-bold text-sm">خروج</button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+      if (!settings || !stats) return <div className="min-h-screen flex items-center justify-center">جاري تحميل بيانات المجموعة...</div>;
+
+      const alertCount = (stats.expiring_soon_members || 0) + (stats.expired_members || 0);
+      const openProfile = (id) => { setSelectedMemberId(id); setTab('profile'); };
+
+      const filteredMembers = members
+        .filter((m) => (statusFilter === 'all' || m.status === statusFilter) && (!search.trim() || [m.full_name, m.phone, m.facebook_url].some((v) => (v || '').toLowerCase().includes(search.trim().toLowerCase()))))
+        .sort((a, b) => sortBy === 'fee' ? b.monthly_fee - a.monthly_fee : sortBy === 'last_payment' ? (b.last_payment_date || '').localeCompare(a.last_payment_date || '') : a.subscription_end_date.localeCompare(b.subscription_end_date));
+
+      const alertList = members.filter((m) => !m.is_archived && m.status !== 'suspended').filter((m) => {
+        const r = daysRemaining(m.subscription_end_date);
+        if (alertFilter === 'today') return r === 0;
+        if (alertFilter === 'soon') return r > 0 && r <= settings.alert_days_before_expiry;
+        if (alertFilter === 'expired') return r < 0;
+        if (alertFilter === 'fb') return r < 0 && m.fb_group_status === 'in_group';
+        return r <= settings.alert_days_before_expiry;
+      });
+
+      const activeMember = members.find((m) => m.id === selectedMemberId);
+
+      const handleConfirm = async () => {
+        if (!confirmBox) return;
+        setBusy(true);
+        try {
+          if (confirmBox.type === 'suspend') await db.from('members').update({ status: 'suspended' }).eq('id', confirmBox.id);
+          if (confirmBox.type === 'reactivate') { await db.from('members').update({ status: 'active' }).eq('id', confirmBox.id); await db.rpc('refresh_subscription_statuses'); }
+          if (confirmBox.type === 'archive') await db.from('members').update({ is_archived: true }).eq('id', confirmBox.id);
+          if (confirmBox.type === 'unarchive') await db.from('members').update({ is_archived: false }).eq('id', confirmBox.id);
+          if (confirmBox.type === 'fb_removed') await db.from('members').update({ fb_group_status: 'removed' }).eq('id', confirmBox.id);
+          setConfirmBox(null);
+          await loadAll();
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const navs = [
+        ['dashboard', 'الرئيسية'],
+        ['members', 'المشتركون'],
+        ['alerts', `التنبيهات${alertCount ? ` (${alertCount})` : ''}`],
+        ['reports', 'التقارير'],
+        ['settings', 'الإعدادات'],
+      ];
+
+      return (
+        <div className="min-h-screen bg-slate-50 pb-24 md:pb-8">
+          <header className="sticky top-0 z-30 bg-white border-b border-slate-200 px-4 py-3 flex items-center justify-between">
+            <div>
+              <h1 className="text-base font-extrabold text-teal-800">مدير اشتراكات المجموعة</h1>
+              <p className="text-xs text-slate-500">{settings.group_name}</p>
+            </div>
+            <div className="hidden md:flex gap-2">
+              {navs.map(([k, lbl]) => (
+                <button key={k} onClick={() => setTab(k)} className={`px-4 py-2 rounded-xl text-sm font-bold ${tab === k ? 'bg-teal-700 text-white' : 'bg-slate-100 text-slate-700'}`}>{lbl}</button>
+              ))}
+            </div>
+            <button onClick={() => setTab('alerts')} className="md:hidden px-3 py-1.5 rounded-xl bg-amber-100 text-amber-900 text-xs font-bold">التنبيهات ({alertCount})</button>
+          </header>
+
+          <main className="max-w-5xl mx-auto p-4 space-y-5">
+            {tab === 'dashboard' && (
+              <>
+                <div className="flex justify-between items-center">
+                  <h2 className="text-lg font-extrabold">لوحة التحكم</h2>
+                  <button onClick={() => setMemberModal({ open: true, member: null })} className="px-4 py-3 rounded-xl bg-teal-700 text-white font-bold text-sm">+ إضافة مشترك</button>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[
+                    ['إجمالي المشتركين', stats.total_members],
+                    ['النشطون', stats.active_members],
+                    [`تنتهي خلال ${settings.alert_days_before_expiry} أيام`, stats.expiring_soon_members],
+                    ['المنتهية', stats.expired_members],
+                    ['الموقوفون', stats.suspended_members],
+                    ['إيراد الشهر الحالي', formatMoney(stats.current_month_revenue, settings.currency)],
+                    ['محصلات الشهر السابق', formatMoney(stats.previous_month_revenue, settings.currency)],
+                    ['بانتظار الإزالة من فيسبوك', stats.pending_fb_removal],
+                  ].map(([t, v], i) => (
+                    <div key={i} className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+                      <div className="text-xs text-slate-500 font-semibold">{t}</div>
+                      <div className="text-xl font-extrabold mt-2">{v}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div className="bg-white rounded-2xl p-4 border border-slate-200">
+                    <h3 className="font-bold mb-3">آخر المدفوعات</h3>
+                    {recentPayments.map((p) => (
+                      <div key={p.id} onClick={() => openProfile(p.member_id)} className="py-2.5 border-b last:border-0 flex justify-between text-sm cursor-pointer">
+                        <div><b>{p.members?.full_name}</b><div className="text-xs text-slate-500">{formatDate(p.payment_date)} • {p.payment_method}</div></div>
+                        <b className="text-emerald-700">+{formatMoney(p.amount, settings.currency)}</b>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="bg-white rounded-2xl p-4 border border-slate-200">
+                    <h3 className="font-bold mb-3">آخر الاشتراكات المنتهية</h3>
+                    {members.filter((m) => m.status === 'expired').slice(0, 6).map((m) => (
+                      <div key={m.id} onClick={() => openProfile(m.id)} className="py-2.5 border-b last:border-0 flex justify-between items-center text-sm cursor-pointer">
+                        <div><b>{m.full_name}</b><div className="text-xs text-slate-500">{formatDate(m.subscription_end_date)}</div></div>
+                        <Badge type={m.status} map={STATUS_LABELS} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {tab === 'members' && (
+              <>
+                <div className="flex justify-between items-center">
+                  <h2 className="text-lg font-extrabold">المشتركون ({filteredMembers.length})</h2>
+                  <button onClick={() => setMemberModal({ open: true, member: null })} className="px-4 py-2.5 rounded-xl bg-teal-700 text-white font-bold text-sm">+ مشترك جديد</button>
+                </div>
+                <div className="bg-white rounded-2xl p-3.5 border border-slate-200 space-y-3">
+                  <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ابحث بالاسم، رقم الهاتف، أو رابط فيسبوك..." className="w-full border border-slate-300 rounded-xl p-3 text-sm" />
+                  <div className="flex flex-wrap gap-2">
+                    {[['all','الكل'],['active','نشط'],['expiring_soon','قريب الانتهاء'],['expired','منتهي'],['suspended','موقوف']].map(([k,l]) => (
+                      <button key={k} onClick={() => setStatusFilter(k)} className={`px-3 py-1.5 rounded-xl text-xs font-bold ${statusFilter === k ? 'bg-teal-700 text-white' : 'bg-slate-100'}`}>{l}</button>
+                    ))}
+                    <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} className="mr-auto border rounded-xl px-2.5 py-1.5 text-xs bg-white font-bold">
+                      <option value="end_date">ترتيب: الانتهاء</option>
+                      <option value="fee">ترتيب: القيمة</option>
+                      <option value="last_payment">ترتيب: آخر دفع</option>
+                    </select>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs font-bold text-slate-600">
+                    <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} /> عرض المؤرشفين
+                  </label>
+                </div>
+                <div className="space-y-3">
+                  {filteredMembers.map((m) => (
+                    <div key={m.id} className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-2.5">
+                      <div className="flex justify-between items-start" onClick={() => openProfile(m.id)}>
+                        <div>
+                          <div className="font-extrabold text-base text-teal-900">{m.full_name}</div>
+                          <div className="text-xs text-slate-500" dir="ltr">{m.phone}</div>
+                        </div>
+                        <Badge type={m.status} map={STATUS_LABELS} />
+                      </div>
+                      <div className="text-xs text-slate-600 flex justify-between bg-slate-50 p-2.5 rounded-xl">
+                        <span>ينتهي: <b>{formatDate(m.subscription_end_date)}</b></span>
+                        <span>القيمة: <b>{formatMoney(m.monthly_fee, settings.currency)}</b></span>
+                      </div>
+                      <div className="flex justify-between items-center pt-1">
+                        <Badge type={m.fb_group_status} map={FB_LABELS} />
+                        <div className="flex gap-2">
+                          <button onClick={() => setWaMember(m)} className="px-3 py-2 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold">واتساب</button>
+                          <button onClick={() => setPayMember(m)} className="px-3.5 py-2 rounded-xl bg-teal-700 text-white text-xs font-bold">دفع / تجديد</button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {tab === 'profile' && activeMember && (
+              <div className="space-y-4">
+                <button onClick={() => setTab('members')} className="text-sm font-bold text-teal-700">← رجوع للمشتركين</button>
+                <div className="bg-white rounded-2xl p-5 border border-slate-200 space-y-4">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <h2 className="text-xl font-extrabold">{activeMember.full_name}</h2>
+                      <div className="text-sm text-slate-500" dir="ltr">{activeMember.phone}</div>
+                    </div>
+                    <div className="flex flex-col gap-1 items-end">
+                      <Badge type={activeMember.status} map={STATUS_LABELS} />
+                      <Badge type={activeMember.fb_group_status} map={FB_LABELS} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 bg-slate-50 p-3.5 rounded-xl text-sm">
+                    <div>القيمة: <b>{formatMoney(activeMember.monthly_fee, settings.currency)}</b></div>
+                    <div>آخر دفع: <b>{formatDate(activeMember.last_payment_date)}</b></div>
+                    <div>البداية: <b>{formatDate(activeMember.subscription_start_date)}</b></div>
+                    <div>الانتهاء: <b className="text-teal-800">{formatDate(activeMember.subscription_end_date)}</b></div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-sm font-bold">
+                    <a href={`tel:${activeMember.phone}`} className="py-3 rounded-xl bg-slate-100 text-center">اتصال هاتفي</a>
+                    <button onClick={() => setWaMember(activeMember)} className="py-3 rounded-xl bg-emerald-600 text-white">واتساب</button>
+                    {activeMember.facebook_url && <a href={activeMember.facebook_url} target="_blank" className="py-3 rounded-xl bg-blue-600 text-white text-center">حساب فيسبوك</a>}
+                    <button onClick={() => setPayMember(activeMember)} className="py-3 rounded-xl bg-teal-700 text-white">تسجيل دفعة / تجديد</button>
+                    <button onClick={() => setMemberModal({ open: true, member: activeMember })} className="py-3 rounded-xl border border-slate-300">تعديل البيانات</button>
+                    <button onClick={() => setConfirmBox({ type: activeMember.status === 'suspended' ? 'reactivate' : 'suspend', id: activeMember.id, title: 'تأكيد', msg: activeMember.status === 'suspended' ? 'إعادة تفعيل العضوية؟' : 'إيقاف هذه العضوية؟', danger: activeMember.status !== 'suspended' })} className="py-3 rounded-xl bg-rose-50 text-rose-700 border border-rose-200">
+                      {activeMember.status === 'suspended' ? 'إعادة تفعيل' : 'إيقاف العضوية'}
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2 pt-2 border-t">
+                    {activeMember.fb_group_status === 'in_group' && (
+                      <button onClick={() => setConfirmBox({ type: 'fb_removed', id: activeMember.id, title: 'فيسبوك', msg: 'هل أزلت العضو من مجموعة فيسبوك يدوياً؟' })} className="px-3.5 py-2 rounded-xl bg-amber-100 text-amber-900 text-xs font-bold">تمت إزالة العضوية</button>
+                    )}
+                    <button onClick={() => setConfirmBox({ type: activeMember.is_archived ? 'unarchive' : 'archive', id: activeMember.id, title: 'الأرشفة', msg: 'أرشفة الملف تحفظ سجل المدفوعات وتخفيه من القائمة النشطة. متابعة؟', danger: !activeMember.is_archived })} className="px-3.5 py-2 rounded-xl bg-slate-100 text-xs font-bold">
+                      {activeMember.is_archived ? 'إلغاء الأرشفة' : 'أرشفة الملف'}
+                    </button>
+                  </div>
+                </div>
+                <div className="bg-white rounded-2xl p-5 border border-slate-200">
+                  <h3 className="font-bold mb-3">سجل المدفوعات ({profilePayments.length})</h3>
+                  {profilePayments.map((p) => (
+                    <div key={p.id} className="py-2.5 border-b last:border-0 flex justify-between text-sm">
+                      <div><b>{formatMoney(p.amount, settings.currency)}</b><div className="text-xs text-slate-500">{formatDate(p.payment_date)} • {p.payment_method}</div></div>
+                      <span className="text-xs font-bold text-emerald-700">{p.is_renewal ? 'تجديد' : 'أول دفعة'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {tab === 'alerts' && (
+              <>
+                <h2 className="text-lg font-extrabold">التنبيهات وقائمة الإزالة</h2>
+                <div className="flex flex-wrap gap-2">
+                  {[['all','الكل'],['today','تنتهي اليوم'],['soon',`خلال ${settings.alert_days_before_expiry} أيام`],['expired','منتهية'],['fb','للمراجعة والإزالة من فيسبوك']].map(([k,l]) => (
+                    <button key={k} onClick={() => setAlertFilter(k)} className={`px-3 py-2 rounded-xl text-xs font-bold ${alertFilter === k ? 'bg-teal-700 text-white' : 'bg-white border'}`}>{l}</button>
+                  ))}
+                </div>
+                <div className="space-y-3">
+                  {alertList.map((m) => (
+                    <div key={m.id} className="bg-white rounded-2xl p-4 border border-slate-200 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <b onClick={() => openProfile(m.id)} className="cursor-pointer">{m.full_name}</b>
+                        <Badge type={m.status} map={STATUS_LABELS} />
+                      </div>
+                      <div className="text-xs text-slate-500">تاريخ الانتهاء: {formatDate(m.subscription_end_date)}</div>
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        <button onClick={() => setWaMember(m)} className="px-3 py-2 rounded-xl bg-emerald-50 text-emerald-700 text-xs font-bold">واتساب</button>
+                        <button onClick={() => setPayMember(m)} className="px-3 py-2 rounded-xl bg-teal-700 text-white text-xs font-bold">تجديد</button>
+                        {daysRemaining(m.subscription_end_date) < 0 && m.fb_group_status === 'in_group' && (
+                          <button onClick={() => setConfirmBox({ type: 'fb_removed', id: m.id, title: 'فيسبوك', msg: `تأكيد إزالة ${m.full_name} من المجموعة؟` })} className="px-3 py-2 rounded-xl bg-amber-100 text-amber-900 text-xs font-bold">تمت إزالة العضوية</button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {tab === 'reports' && (
+              <div className="space-y-4">
+                <div className="flex justify-between items-center">
+                  <h2 className="text-lg font-extrabold">التقارير المالية</h2>
+                  <button onClick={() => downloadCSV(`تقرير-${repStart}-${repEnd}.csv`, ['المشترك','الهاتف','المبلغ','التاريخ','الطريقة','النوع'], repPayments.map((p) => [p.members?.full_name, p.members?.phone, p.amount, p.payment_date, p.payment_method, p.is_renewal ? 'تجديد' : 'جديد']))} className="px-4 py-2.5 rounded-xl bg-emerald-700 text-white text-xs font-bold">تصدير Excel CSV</button>
+                </div>
+                {report && (
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-white p-3.5 rounded-2xl border"><div className="text-xs text-slate-500">اليوم</div><b className="text-base">{formatMoney(report.daily_revenue, settings.currency)}</b></div>
+                    <div className="bg-white p-3.5 rounded-2xl border"><div className="text-xs text-slate-500">الشهر</div><b className="text-base">{formatMoney(report.monthly_revenue, settings.currency)}</b></div>
+                    <div className="bg-white p-3.5 rounded-2xl border"><div className="text-xs text-slate-500">السنة</div><b className="text-base">{formatMoney(report.yearly_revenue, settings.currency)}</b></div>
+                  </div>
+                )}
+                <div className="bg-white p-4 rounded-2xl border space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><label className="text-xs font-bold">من</label><input type="date" value={repStart} onChange={(e) => setRepStart(e.target.value)} className="w-full border rounded-xl p-2.5 text-sm" /></div>
+                    <div><label className="text-xs font-bold">إلى</label><input type="date" value={repEnd} onChange={(e) => setRepEnd(e.target.value)} className="w-full border rounded-xl p-2.5 text-sm" /></div>
+                  </div>
+                  {report && (
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div className="bg-teal-50 p-3 rounded-xl">المحصّل بالفترة: <b className="block text-sm">{formatMoney(report.period_revenue, settings.currency)}</b></div>
+                      <div className="bg-slate-50 p-3 rounded-xl">مشتركون جدد: <b className="block text-sm">{report.new_members_count}</b></div>
+                      <div className="bg-emerald-50 p-3 rounded-xl">اشتراكات مجددة: <b className="block text-sm">{report.renewed_count}</b></div>
+                      <div className="bg-rose-50 p-3 rounded-xl">غير مجددة: <b className="block text-sm">{report.unrenewed_count}</b></div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {tab === 'settings' && (
+              <SettingsView settings={settings} db={db} onSaved={(s) => { setSettings(s); loadAll(); }} onResetConfig={resetConfig} />
+            )}
+          </main>
+
+          <nav className="md:hidden fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 grid grid-cols-5 py-2 px-1 text-[11px] font-bold shadow-lg">
+            {[['dashboard','الرئيسية'],['members','المشتركون'],['alerts','التنبيهات'],['reports','التقارير'],['settings','الإعدادات']].map(([k,l]) => (
+              <button key={k} onClick={() => setTab(k)} className={`py-2 rounded-xl ${tab === k ? 'bg-teal-50 text-teal-800' : 'text-slate-500'}`}>{l}</button>
+            ))}
+          </nav>
+
+          <MemberModal open={memberModal.open} member={memberModal.member} settings={settings} db={db} onDone={loadAll} onClose={() => setMemberModal({ open: false, member: null })} />
+          <PaymentModal open={Boolean(payMember)} member={payMember} settings={settings} db={db} onDone={loadAll} onClose={() => setPayMember(null)} />
+          <WhatsAppModal open={Boolean(waMember)} member={waMember} defaultMsg={settings.whatsapp_template} onClose={() => setWaMember(null)} />
+          <ConfirmModal open={Boolean(confirmBox)} title={confirmBox?.title} msg={confirmBox?.msg} danger={confirmBox?.danger} loading={busy} onOk={handleConfirm} onCancel={() => setConfirmBox(null)} />
+        </div>
+      );
+    }
+
+    function SettingsView({ settings, db, onSaved, onResetConfig }) {
+      const [form, setForm] = useState(settings);
+      const [msg, setMsg] = useState('');
+      const save = async (e) => {
+        e.preventDefault();
+        const { data, error } = await db.from('app_settings').update({
+          group_name: form.group_name,
+          currency: form.currency,
+          default_monthly_fee: Number(form.default_monthly_fee),
+          default_duration_months: Number(form.default_duration_months),
+          alert_days_before_expiry: Number(form.alert_days_before_expiry),
+          whatsapp_template: form.whatsapp_template,
+        }).eq('id', 1).select().single();
+        if (!error) { await db.rpc('refresh_subscription_statuses'); onSaved(data); setMsg('تم الحفظ بنجاح'); }
+      };
+      const backup = async () => {
+        const [m, p, s] = await Promise.all([db.from('members').select('*'), db.from('payments').select('*'), db.from('app_settings').select('*')]);
+        downloadJSON(`نسخة-احتياطية-${todayISO()}.json`, { exported_at: new Date().toISOString(), members: m.data, payments: p.data, settings: s.data });
+      };
+      return (
+        <div className="space-y-4">
+          <h2 className="text-lg font-extrabold">الإعدادات والنسخ الاحتياطي</h2>
+          <form onSubmit={save} className="bg-white p-5 rounded-2xl border space-y-3">
+            {msg && <div className="p-2.5 rounded-xl bg-emerald-50 text-emerald-800 text-xs font-bold">{msg}</div>}
+            <div><label className="text-xs font-bold">اسم المجموعة</label><input value={form.group_name} onChange={(e) => setForm({ ...form, group_name: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className="text-xs font-bold">العملة</label><input value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
+              <div><label className="text-xs font-bold">قيمة الاشتراك الافتراضية</label><input type="number" value={form.default_monthly_fee} onChange={(e) => setForm({ ...form, default_monthly_fee: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
+              <div><label className="text-xs font-bold">المدة الافتراضية (أشهر)</label><input type="number" min="1" value={form.default_duration_months} onChange={(e) => setForm({ ...form, default_duration_months: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
+              <div><label className="text-xs font-bold">أيام التنبيه قبل الانتهاء</label><input type="number" min="1" value={form.alert_days_before_expiry} onChange={(e) => setForm({ ...form, alert_days_before_expiry: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
+            </div>
+            <div><label className="text-xs font-bold">رسالة واتساب</label><textarea rows="3" value={form.whatsapp_template} onChange={(e) => setForm({ ...form, whatsapp_template: e.target.value })} className="w-full border rounded-xl p-3 text-sm" /></div>
+            <button type="submit" className="w-full py-3 rounded-xl bg-teal-700 text-white font-bold">حفظ الإعدادات</button>
+          </form>
+          <button onClick={backup} className="w-full py-3 rounded-xl bg-slate-800 text-white font-bold text-sm">تنزيل نسخة احتياطية كاملة (JSON)</button>
+          <button onClick={() => db.auth.signOut()} className="w-full py-3 rounded-xl bg-rose-50 text-rose-700 border border-rose-200 font-bold text-sm">تسجيل الخروج</button>
+          <button onClick={onResetConfig} className="w-full py-2 text-xs text-slate-400 underline">تغيير ربط قاعدة البيانات</button>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
